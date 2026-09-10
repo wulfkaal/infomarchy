@@ -4,8 +4,29 @@ All notable changes to Infomarchy. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Fixed
+- **Automatic topic refinement can be switched off, because the loopback test cannot see an SSH forward.** Refinement is gated on `OLLAMA_HOST` being loopback, but that test reads the address rather than the destination: an `ssh -L 11434:localhost:11434` forward answers on `127.0.0.1`, passes the check, and refinement then posts prompt text to another machine. A forward is indistinguishable from a local socket by address, so this does not make the check smarter — `INFOMARCHY_SKIP_REFINEMENT=1` disables automatic refinement outright, checked before both the loopback test and the explicit `INFOMARCHY_ALLOW_REMOTE_OLLAMA` opt-in. Scope is refinement only: inventory polling and explicit LOAD/UNLOAD are unchanged, the latter posting an empty prompt to set model residency rather than session text. Set it in the shell's own environment and restart the shell, since the collectors inherit theirs at launch. It also suits anyone who simply wants a desk that does not refine on its own, on a metered link or a shared box.
+
+## [1.1.3] — 2026-09-07
+
+### Fixed
+- **The version on the desk tracks the manifest.** `omarchy plugin update` rewrites `manifest.json` under a running shell, and the About panel read it once at load — so after an in-place update the desk went on reporting the version it started with, which is the one number that must never be stale. The manifest is watched now.
+
+## [1.1.2] — 2026-09-07
+
+### Changed
+- **A video wallpaper is whatever Omarchy says it is.** Both surfaces asked a literal extension list of their own, so a format added to Omarchy's `Util.isVideoPath` would have left the desk blank here until Infomarchy was changed to match. They now defer to `Util.isVideoPath` when the running Omarchy has it, and fall back to the list only where it does not — calling a function that is not there would take the plugin down on exactly the older desktops the fallback exists for.
+
+## [1.1.1] — 2026-09-07
+
+### Fixed
+- **Video wallpapers show.** Infomarchy hosts the background layer in place of `omarchy.background`, and drew the wallpaper with a plain `Image`. Omarchy's video wallpapers (quattro) therefore arrived as `Error decoding: ... Unsupported image format` and left the desk on the flat theme colour — selecting one looked like the picker had done nothing. Stills and videos are now handed to separate surfaces, and a video goes to Omarchy's own `BackgroundMedia`, reached through a Loader by URL so an Omarchy without video support never resolves the type and keeps the still path exactly as it was. Playback stops while a fullscreen window covers that output, since Qt's FFmpeg engine drives its own clock and an unseen wallpaper otherwise decodes on. The SUPER+D overlay had the same blank and is fixed with it, and decodes only while it is open.
+
+## [1.1.0] — 2026-09-07
+
 ### Added
 - **GITHUB · LAST 7 DAYS.** The activity row is now two half-width cards: the AI prompt heatmap on the left and, on the right, the same hour-by-hour grid fed from GitHub — commits, PRs, reviews, issues, comments and other events, coloured by dominant kind, hover for the breakdown and the repositories, today/week counts in the header. Click pins a cell; a legend kind recolours the grid to that kind alone. It is a removable module (**4** in the overlay; the modules after it shift one key and **0** reaches the tenth) and either card takes the full row when the other is hidden.
+- **ABOUT.** The version sits at the quiet end of the legend line under the last card — on screen always, never in the way of the data. Clicking it opens ABOUT: the version, a link to the repository, and a link to nixfred.com. The version is read from `manifest.json` at load, so it cannot drift from the version the plugin actually ships as, and `openUrl` refuses any address other than those two. Esc closes ABOUT before it closes the desk.
 - **Grok Bot gets a card per bot.** The xAI desktop app runs its whole roster inside one Electron process, so `/proc` can only ever show one agent. Infomarchy reads the app's own local roster (`~/.config/Grok Bot/sand-client-persistence`, one plain-JSON file per state slice, named by the base32 of its key) and expands it into one **Live AI session** card per bot: the bot's name, the last line it wrote (markdown flattened, secrets redacted the same way prompts are), and its **Needs You** state — *waiting for your answer*, or *has replies you have not read* with the count on the card. Hidden-from-sidebar bots get no card, and transcripts are never opened. Because the bots share one process, its CPU/RAM/GPU counters are attributed once — to the bot the app currently has open — and the other cards report `—` rather than repeating the same process nine times. The alert key omits the unread count, so a bot notifies when it goes unread, not again on every further reply.
 - **Grok Bot is detected at all.** Electron rewrites its process title, so the whole command line arrives as a single `argv[0]` — and the install path itself contains a space. The browser process is now matched on that line, while the zygote/renderer/gpu/utility helpers (`--type=`) and the `local-exec-daemon` script are not.
 - **Grok CLI sessions are counted from disk.** Grok ≥ 1.0 gives every session its own directory under the encoded cwd, so sessions that have not been prompted yet were invisible. `GROK_HOME` is honoured, and a project path too long to encode is read back from the group's `.cwd` file instead of showing as a slug plus a hash.
