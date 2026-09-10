@@ -458,10 +458,26 @@ async function gpu() {
 }
 function temp() {
   let best: number | null = null;
+  const hottest = (raw: string | null) => {
+    if (!raw) return;
+    const v = +raw / 1000;
+    // Sysfs reports millidegrees. Cap at 150 so a sensor reading its error
+    // sentinel does not become the machine's headline temperature.
+    if (Number.isFinite(v) && v > 0 && v < 150 && (best === null || v > best)) best = v;
+  };
   for (const z of ls("/sys/class/thermal")) {
     if (!z.startsWith("thermal_zone")) continue;
-    const t = read(`/sys/class/thermal/${z}/temp`); if (!t) continue;
-    const v = +t / 1000; if (v > 0 && (best === null || v > best)) best = v;
+    hottest(read(`/sys/class/thermal/${z}/temp`));
+  }
+  // Apple Silicon exposes one thermal zone and it is the battery, so the CPU
+  // meter used to show a 32° battery while the machine ran hotter elsewhere.
+  // hwmon carries the real sensors (macsmc on Asahi, coretemp/k10temp on x86).
+  for (const h of ls("/sys/class/hwmon")) {
+    if (!h.startsWith("hwmon")) continue;
+    for (const f of ls(`/sys/class/hwmon/${h}`)) {
+      if (!/^temp\d+_input$/.test(f)) continue;
+      hottest(read(`/sys/class/hwmon/${h}/${f}`));
+    }
   }
   return best;
 }
