@@ -713,6 +713,9 @@ describe("prompt text never leaves the machine by default", () => {
     expect(topicRefinementAllowed({ OLLAMA_HOST: "http://127.0.0.1:11434", INFOMARCHY_SKIP_REFINEMENT: "1" } as any)).toBe(false);
     expect(topicRefinementAllowed({ INFOMARCHY_SKIP_REFINEMENT: "1" } as any)).toBe(false);
     expect(topicRefinementAllowed({ OLLAMA_HOST: "http://100.68.193.41:11434", INFOMARCHY_ALLOW_REMOTE_OLLAMA: "1", INFOMARCHY_SKIP_REFINEMENT: "1" } as any)).toBe(false);
+    // The older name existing machine configs set is the same switch.
+    expect(topicRefinementAllowed({ OLLAMA_HOST: "http://127.0.0.1:11434", INFOMARCHY_NO_INFERENCE: "1" } as any)).toBe(false);
+    expect(topicRefinementAllowed({ OLLAMA_HOST: "http://127.0.0.1:11434", INFOMARCHY_NO_INFERENCE: "0" } as any)).toBe(true);
     // Only the exact value opts out; anything else leaves behaviour unchanged.
     expect(topicRefinementAllowed({ OLLAMA_HOST: "http://127.0.0.1:11434", INFOMARCHY_SKIP_REFINEMENT: "0" } as any)).toBe(true);
     expect(topicRefinementAllowed({ OLLAMA_HOST: "http://127.0.0.1:11434", INFOMARCHY_SKIP_REFINEMENT: "true" } as any)).toBe(true);

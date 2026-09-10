@@ -949,7 +949,9 @@ export function topicRefinementAllowed(env = process.env): boolean {
   // Scope: automatic refinement only. Explicit LOAD/UNLOAD in ollama-control.ts
   // still reaches /api/generate, but with an empty prompt to set keep_alive —
   // model residency, not session text.
-  if (env.INFOMARCHY_SKIP_REFINEMENT === "1") return false;
+  // INFOMARCHY_NO_INFERENCE is the same switch under the name existing
+  // machine configs (hypr/monitors.lua) already set.
+  if (env.INFOMARCHY_SKIP_REFINEMENT === "1" || env.INFOMARCHY_NO_INFERENCE === "1") return false;
   return env.INFOMARCHY_ALLOW_REMOTE_OLLAMA === "1" || ollamaHostIsLocal(env.OLLAMA_HOST);
 }
 async function refineSessionTopics(sessions: any[], recentEntries: any[], ollama: any): Promise<Record<string, any>> {
