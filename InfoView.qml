@@ -1388,10 +1388,10 @@ Item {
         }
       }
 
-      // RIGHT COLUMN: usage + local AI + machine corner
+      // RIGHT COLUMN: usage + local AI + remote roster + machine corner
       GridLayout {
         id: rightColumn
-        visible: view.sectionEnabled("usage") || view.sectionEnabled("localAi") || view.sectionEnabled("machine")
+        visible: view.sectionEnabled("usage") || view.sectionEnabled("localAi") || view.sectionEnabled("machine") || !!view.ai.remoteRoster
         Layout.fillHeight: true
         // A fixed column: content-driven widths let the column drift narrower
         // whenever card text became shrinkable, and rows then overran the border.
@@ -1543,7 +1543,7 @@ Item {
                   PlainText { text: up.u.name || up.modelData; color: up.tone; font.family: view.mono; font.bold: true; font.pixelSize: Style.font.body }
                   PlainText { text: up.u.tierLabel || ""; color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption }
                   Item { Layout.fillWidth: true }
-                  PlainText { text: "today " + (up.u.todayPrompts || 0) + "p · " + view.desk.tokens(up.u.todayTotalTokens) + " tok" + (up.u.value && up.u.value.today !== null && up.u.value.today !== undefined ? " · ≈" + view.usageMoney(up.u.value.today) : ""); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption }
+                  PlainText { text: "today " + (up.u.todayPrompts || 0) + "p" + (up.u.todaySessions ? " · " + up.u.todaySessions + " sess" : "") + (up.u.hasTokenData ? " · " + view.desk.tokens(up.u.todayTotalTokens) + " tok" + (up.u.value && up.u.value.today !== null && up.u.value.today !== undefined ? " · ≈" + view.usageMoney(up.u.value.today) : "") : ""); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption }
                 }
                 PlainText {
                   Layout.fillWidth: true
@@ -1561,6 +1561,34 @@ Item {
                     return parts.join(" · ")
                   }
                   color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption
+                }
+                // Per-model breakdown. Anthropic gives Fable its own rate-limit
+                // window above; OpenAI and xAI publish no per-model window, so
+                // this is each model's share of the work instead. Driven purely
+                // by what the provider reports — a model released tomorrow
+                // appears here on its own, with no change to this file.
+                Repeater {
+                  model: (up.u.models || []).filter(function(m) { return m && ((m.share || 0) > 0 || (m.sessions || 0) > 0) })
+                  delegate: Meter {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    label: modelData.id || ""
+                    value: up.u.hasTokenData
+                      ? view.desk.tokens(modelData.todayTokens) + " tok  ·  " + Math.round((modelData.share || 0) * 100) + "%"
+                      : (modelData.sessions || 0) + " sess"
+                    // A provider with no token counts has no share to draw.
+                    fraction: up.u.hasTokenData ? (modelData.share || 0) : 0
+                    tone: up.tone
+                  }
+                }
+                // Why a provider has no limit bars. Absent everywhere else, so it
+                // costs a row only for the provider that needs to explain itself.
+                PlainText {
+                  Layout.fillWidth: true
+                  visible: !!up.u.usageStatusText && !(up.u.limits || []).length
+                  text: up.u.usageStatusText || ""
+                  color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
                 }
                 Repeater {
                   model: up.u.limits || []
@@ -1757,6 +1785,64 @@ Item {
               Tag { visible: !!(provRow.ps.grokBot && provRow.ps.grokBot.present); text: "grok bot " + (provRow.ps.grokBot ? provRow.ps.grokBot.sessions : 0) + " bots" + (provRow.ps.grokBot && provRow.ps.grokBot.unread ? " · " + provRow.ps.grokBot.unread + " unread" : ""); tone: view.desk.providerColor("grok-bot") }
               Tag { visible: !!(provRow.ps.opencode && provRow.ps.opencode.present); text: "opencode " + (provRow.ps.opencode ? provRow.ps.opencode.sessions : 0) + " sess"; tone: view.desk.providerColor("opencode") }
             }
+          }
+        }
+
+        // Remote agents are compact, read-only lines, independent of sessions.
+        Card {
+          id: remoteRosterCard
+          Layout.row: view.settings.rightIndex("remoteRoster")
+          Layout.column: 0
+          Layout.fillWidth: true
+          visible: !!view.ai.remoteRoster
+          title: "REMOTE"
+          readonly property var roster: view.ai.remoteRoster || ({ state: "unavailable", fetchedAt: 0, counts: {}, needsYou: [], overflow: 0 })
+          // Keep the 1080p right column compact; larger desks may show all four.
+          readonly property int rowLimit: view.height / Style.fontScale <= 1080 ? 2 : 4
+          readonly property var rows: roster.needsYou.slice(0, rowLimit)
+          readonly property int remaining: roster.overflow + roster.needsYou.length - rows.length
+          hint: (roster.state === "unavailable" ? "unavailable" : (roster.state === "stale" ? "stale · " : "") + view.desk.ago(roster.fetchedAt)) + (roster.workspace ? " · click to open" : "")
+          ColumnLayout {
+            anchors { left: parent.left; right: parent.right }
+            spacing: Style.spacing.xs
+            PlainText {
+              Layout.fillWidth: true
+              text: remoteRosterCard.roster.state === "unavailable" ? "roster unavailable" : remoteRosterCard.roster.counts.busy + " busy · " + remoteRosterCard.roster.counts.idle + " idle · " + remoteRosterCard.roster.counts.offline + " offline"
+              color: view.textDim
+              font.family: view.mono
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+            Repeater {
+              model: remoteRosterCard.rows
+              delegate: PlainText {
+                required property var modelData
+                Layout.fillWidth: true
+                text: modelData.attention + " · " + (modelData.name || modelData.id) + " · " + modelData.lastLine
+                color: modelData.attention === "blocked" ? view.desk.red : view.desk.providerColor("remote")
+                font.family: view.mono
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+            PlainText {
+              visible: remoteRosterCard.remaining > 0
+              text: "+" + remoteRosterCard.remaining
+              color: view.textFaint
+              font.family: view.mono
+              font.pixelSize: Style.font.caption
+            }
+          }
+          // The only action the card offers, and only when the operator has said
+          // where their own view of these agents is. It focuses a workspace; it
+          // never touches the agents themselves.
+          MouseArea {
+            anchors.fill: parent
+            z: 1
+            enabled: view.interactive && !!remoteRosterCard.roster.workspace
+            hoverEnabled: enabled
+            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: view.desk.focusWorkspace(remoteRosterCard.roster.workspace)
           }
         }
 

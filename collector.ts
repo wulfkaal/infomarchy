@@ -1332,9 +1332,16 @@ async function liveSessions(pids: number[]) {
       }
     }
     const herdrHost = hosts.find(host => host.kind === "herdr");
-    if (herdrHost && !w) {
-      const clientWindow = herdrWindowFor(herdrHost, herdrClients);
-      if (clientWindow) { w = clientWindow; herdrHost.attached = true; }
+    if (herdrHost) {
+      if (!w) {
+        const clientWindow = herdrWindowFor(herdrHost, herdrClients);
+        if (clientWindow) w = clientWindow;
+      }
+      // Herdr renders every workspace inside a single window, so most agents
+      // reach it through their own ancestry and the lookup above never runs.
+      // Setting attached only on that branch left every ordinary Herdr session
+      // reporting "not attached" while its pane was perfectly reachable.
+      herdrHost.attached = !!w;
     }
     const sessionIds = processSessionIds(p.pid, prov, p.cmd);
     // Claude's own registry wins over heuristics: exact id, display name, and
@@ -1951,6 +1958,41 @@ export function normalizeUsageLimit(limit: any, stamp = now): any | null {
     forecast: limitForecast(limit, stamp),
   };
 }
+// Per-model breakdown. Anthropic publishes a real rate-limit window per model
+// family (that is where "Fable Weekly" comes from); OpenAI and xAI do not, so
+// for those the honest equivalent is each model's share of the work. Built by
+// union of whatever the provider reports, so a model that ships tomorrow shows
+// up on its own — nothing here knows the name of a single model.
+export function usageModelBreakdown(j: any): any[] {
+  const count = (value: unknown) => { const n = Number(value); return Number.isFinite(n) && n >= 0 ? n : 0; };
+  const asMap = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value)) ? value as Record<string, any> : {};
+  const today = asMap(j.todayTokensByModel), lifetime = asMap(j.modelUsage), sessions = asMap(j.modelSessions);
+  const ids: string[] = [];
+  for (const source of [today, lifetime, sessions])
+    for (const key of Object.keys(source).slice(0, 32)) {
+      const id = uiString(key, 64);
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+  const tokensOf = (value: unknown) => {
+    if (typeof value === "number") return count(value);
+    const entry = asMap(value);
+    return count(entry.inputTokens) + count(entry.outputTokens) + count(entry.cacheReadInputTokens) + count(entry.cacheCreationInputTokens);
+  };
+  const models = ids.map(id => ({
+    id,
+    todayTokens: tokensOf(today[id]),
+    lifetimeTokens: tokensOf(lifetime[id]),
+    sessions: count(sessions[id]),
+  }));
+  const todayTotal = models.reduce((sum, m) => sum + m.todayTokens, 0);
+  const lifetimeTotal = models.reduce((sum, m) => sum + m.lifetimeTokens, 0);
+  // Share of today when there was any work today, otherwise of lifetime, so a
+  // quiet morning still shows the mix rather than a row of empty bars.
+  return models
+    .map(m => ({ ...m, share: todayTotal ? m.todayTokens / todayTotal : lifetimeTotal ? m.lifetimeTokens / lifetimeTotal : 0 }))
+    .sort((a, b) => (b.todayTokens - a.todayTokens) || (b.lifetimeTokens - a.lifetimeTokens) || (b.sessions - a.sessions) || a.id.localeCompare(b.id))
+    .slice(0, 8);
+}
 export function normalizeUsage(j: any, stamp = now): any {
   const count = (value: unknown) => { const n = Number(value); return Number.isFinite(n) && n >= 0 ? n : 0; };
   const modelUsage: Record<string, any> = {};
@@ -1969,6 +2011,10 @@ export function normalizeUsage(j: any, stamp = now): any {
   const dayKeys = heatDays.map(localDayKey);
   return {
     name: uiString(j.name, 64), ready: j.ready !== false, tierLabel: uiString(j.tierLabel, 32),
+    // A provider that publishes no token counts must not read as one that used
+    // no tokens. "0 tok" is a measurement; absent data is not.
+    hasTokenData: count(j.todayTotalTokens) > 0 || Object.keys(modelUsage).length > 0 || recentDays.length > 0,
+    models: usageModelBreakdown(j),
     // Ship the projection from the tested implementation instead of letting
     // the QML re-derive it (the copy there had drifted out of test coverage).
     limits: (Array.isArray(j.limits) ? j.limits : []).slice(0, 16).map((limit: any) => normalizeUsageLimit(limit, stamp)).filter(Boolean),
@@ -1986,6 +2032,57 @@ export function normalizeUsage(j: any, stamp = now): any {
     },
   };
 }
+// Grok publishes no usage cache the way Claude and Codex do: Omarchy ships no
+// collector for it, it bills credits rather than rate-limit windows, and
+// `/usage` opens billing in a browser. What it does keep on disk is one
+// directory per session with a signals.json, so the desk reports the part that
+// is real — prompts, sessions and the models used — and says plainly that the
+// rest is not published locally rather than drawing an empty limit bar.
+export function grokSessionUsage(base: string): { sessions: number; todaySessions: number; models: string[]; modelSessions: Record<string, number> } {
+  const models = new Set<string>();
+  const modelSessions: Record<string, number> = {};
+  let sessions = 0, todaySessions = 0, scanned = 0;
+  for (const dir of ls(join(base, "sessions"))) {
+    const group = join(base, "sessions", dir);
+    try { const state = lstatSync(group); if (state.isSymbolicLink() || !state.isDirectory()) continue; } catch { continue; }
+    for (const entry of ls(group)) {
+      if (!cleanSessionId(entry) || scanned >= MAX_COLLECTION_ITEMS) continue;
+      const sessionDir = join(group, entry);
+      try { const state = lstatSync(sessionDir); if (state.isSymbolicLink() || !state.isDirectory()) continue; } catch { continue; }
+      scanned++; sessions++;
+      const summary = readJson(join(sessionDir, "summary.json"));
+      const active = Date.parse(uiString(summary?.last_active_at || summary?.updated_at, 64));
+      if (Number.isFinite(active) && active >= todayStart) todaySessions++;
+      const model = uiString(summary?.current_model_id, 64);
+      if (model && (models.has(model) || models.size < 8)) {
+        models.add(model);
+        modelSessions[model] = (modelSessions[model] || 0) + 1;
+      }
+    }
+  }
+  return { sessions, todaySessions, models: [...models], modelSessions };
+}
+function grokUsage() {
+  const base = process.env.GROK_HOME || join(HOME, ".grok");
+  if (!existsSync(base)) return null;
+  const { sessions, todaySessions, models, modelSessions } = grokSessionUsage(base);
+  const prompts = counts.grok || { today: 0, week: 0, total: 0 };
+  return normalizeUsage({
+    name: "Grok",
+    ready: true,
+    tierLabel: "",
+    todayPrompts: prompts.today,
+    totalPrompts: prompts.total,
+    todaySessions,
+    totalSessions: sessions,
+    // No token totals and no rate-limit windows exist on disk. Reporting zeros
+    // as if they were measurements is the thing to avoid here.
+    limits: [],
+    // No tokens to weigh models by, so the breakdown counts sessions instead.
+    modelSessions,
+    usageStatusText: "credits, not rate-limit windows \u2014 run /usage in Grok for the balance",
+  });
+}
 function agentsUsage() {
   // Omarchy's own agents plugin caches rate limits + token usage here; reuse it when present.
   // Every field is normalized to what the cards display: two individually valid
@@ -2000,7 +2097,69 @@ function agentsUsage() {
     const key = uiString(f.replace(/\.json$/, ""), 32);
     if (key) out[key] = normalizeUsage(j);
   }
+  // Only when Omarchy has not grown a collector of its own; a real cache is
+  // always better than what can be inferred from the session directories.
+  if (!out.grok) { const grok = grokUsage(); if (grok) out.grok = grok; }
   return out;
+}
+
+// External roster data is presentation-only: never merge it into local sessions.
+const MAX_REMOTE_ROSTER_BYTES = 256 * 1024;
+type RemoteAttention = "blocked" | "waiting" | "done";
+export type RemoteRoster = {
+  state: "ok" | "stale" | "unavailable";
+  fetchedAt: number;
+  counts: { busy: number; idle: number; offline: number };
+  needsYou: { id: string; name: string; lastLine: string; attention: RemoteAttention }[];
+  overflow: number;
+  // Where this operator's own view of those agents lives, if they have one.
+  workspace?: number;
+};
+function unavailableRoster(): RemoteRoster {
+  return { state: "unavailable", fetchedAt: 0, counts: { busy: 0, idle: 0, offline: 0 }, needsYou: [], overflow: 0 };
+}
+// A remote agent has no window on this machine, so there is nothing here for a
+// click to focus — unless the operator has built their own view of those agents
+// and says which workspace it is on. Unset, which is the default, keeps the card
+// inert; the desk never guesses, and never learns what that view contains.
+export function remoteWorkspace(value = process.env.INFOMARCHY_REMOTE_WORKSPACE): number | undefined {
+  return typeof value === "string" && /^[1-9][0-9]?$/.test(value) ? Number(value) : undefined;
+}
+export function parseRemoteRoster(text: string, mtime: number, stamp = Date.now()): RemoteRoster {
+  if (Buffer.byteLength(text, "utf8") > MAX_REMOTE_ROSTER_BYTES) return unavailableRoster();
+  const doc = parseJsonBounded(text);
+  if (!doc || doc.v !== 1 || !Array.isArray(doc.agents)) return unavailableRoster();
+  const parsedTime = typeof doc.fetchedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.test(doc.fetchedAt)
+    ? Date.parse(doc.fetchedAt) : NaN;
+  const fetchedAt = Number.isFinite(parsedTime) && parsedTime >= 946_684_800_000 && parsedTime <= stamp + 60_000 ? parsedTime : mtime;
+  const result: RemoteRoster = { ...unavailableRoster(), state: stamp - fetchedAt > 300_000 ? "stale" : "ok", fetchedAt };
+  const seen = new Set<string>();
+  const rank = { blocked: 0, waiting: 1, done: 2 };
+  for (const row of doc.agents.slice(0, 100)) {
+    if (!row || typeof row.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(row.id) || seen.has(row.id)) continue;
+    if (row.status !== "busy" && row.status !== "idle" && row.status !== "offline") continue;
+    // First ingested row owns the id; a rejected status does not reserve it.
+    seen.add(row.id);
+    result.counts[row.status as keyof RemoteRoster["counts"]]++;
+    if (row.attention !== "blocked" && row.attention !== "waiting" && row.attention !== "done") continue;
+    result.needsYou.push({ id: row.id, name: uiString(row.name, 64), lastLine: safePrompt(row.lastLine), attention: row.attention });
+  }
+  result.needsYou.sort((a, b) => rank[a.attention] - rank[b.attention]);
+  result.overflow = Math.max(0, result.needsYou.length - 4);
+  result.needsYou = result.needsYou.slice(0, 4);
+  return result;
+}
+export function readRemoteRoster(path = process.env.INFOMARCHY_REMOTE_ROSTER, stamp = Date.now()): RemoteRoster | undefined {
+  if (!path) return undefined;
+  const workspace = remoteWorkspace();
+  const withWorkspace = (roster: RemoteRoster): RemoteRoster => workspace ? { ...roster, workspace } : roster;
+  let stat;
+  try { stat = lstatSync(path); }
+  catch (error) {
+    return ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code || "") ? undefined : withWorkspace(unavailableRoster());
+  }
+  const text = readRegularFileLimited(path, MAX_REMOTE_ROSTER_BYTES);
+  return withWorkspace(text === null ? unavailableRoster() : parseRemoteRoster(text, stat.mtimeMs, stamp));
 }
 
 // ---------------------------------------------------------------- main
@@ -2009,7 +2168,12 @@ export function frameSnapshot(value: unknown): string {
   // passed its own bounds but sits deeper inside the snapshot (a 22-level
   // object smuggled in as a pid) can no longer trip the budget check into
   // replacing the whole desk with an error frame.
-  const sanitized = sanitizeForUi(value);
+  let sanitized = sanitizeForUi(value);
+  // Optional roster data must never turn a valid local desk into an error frame.
+  if (sanitized?.ai?.remoteRoster !== undefined &&
+      (!structureWithinBudget(sanitized, MAX_JSON_NODES, MAX_JSON_DEPTH) || Buffer.byteLength(JSON.stringify(sanitized), "utf8") > MAX_SNAPSHOT_BYTES)) {
+    delete sanitized.ai.remoteRoster;
+  }
   if (!structureWithinBudget(sanitized, MAX_JSON_NODES, MAX_JSON_DEPTH)) throw new Error("snapshot structure exceeded budget");
   const payload = JSON.stringify(sanitized);
   if (Buffer.byteLength(payload, "utf8") > MAX_SNAPSHOT_BYTES) throw new Error("snapshot exceeded byte budget");
@@ -2191,6 +2355,7 @@ async function runCollector() {
       usageDays: heatDays.map(localDayKey),
       heatmap: { start: start7, days: heatDays, cells: heat.map(c => [c.n, c.p]) },
       github,
+      remoteRoster: readRemoteRoster(),
       recent: dashboardRecent, recentTruncated,
     },
   };

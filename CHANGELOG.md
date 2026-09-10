@@ -4,8 +4,31 @@ All notable changes to Infomarchy. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+### Added
+- Optional read-only **REMOTE** roster from `INFOMARCHY_REMOTE_ROSTER`: bounded local JSON ingest, freshness labels, status counts and compact attention rows beside LOCAL AI. Existing right-column orders migrate automatically; local sessions and notifications stay independent. Optionally, `INFOMARCHY_REMOTE_WORKSPACE` names a workspace and the card becomes a doorway to it: one click focuses that workspace, where the operator's own view of those agents lives. Unset, the card has no interactions at all.
+
 ### Fixed
 - **Automatic topic refinement can be switched off, because the loopback test cannot see an SSH forward.** Refinement is gated on `OLLAMA_HOST` being loopback, but that test reads the address rather than the destination: an `ssh -L 11434:localhost:11434` forward answers on `127.0.0.1`, passes the check, and refinement then posts prompt text to another machine. A forward is indistinguishable from a local socket by address, so this does not make the check smarter — `INFOMARCHY_SKIP_REFINEMENT=1` disables automatic refinement outright, checked before both the loopback test and the explicit `INFOMARCHY_ALLOW_REMOTE_OLLAMA` opt-in. Scope is refinement only: inventory polling and explicit LOAD/UNLOAD are unchanged, the latter posting an empty prompt to set model residency rather than session text. Set it in the shell's own environment and restart the shell, since the collectors inherit theirs at launch. It also suits anyone who simply wants a desk that does not refine on its own, on a metered link or a shared box.
+
+## [1.3.0] — 2026-09-08
+
+### Added
+- **Per-model breakdown for every provider.** Anthropic publishes a real rate-limit window per model family, which is where **Fable Weekly** comes from; OpenAI and xAI publish no such window, so the honest equivalent is each model's share of the work. Codex now breaks out `gpt-6-astra` and `codex-auto-review`, Claude shows its models beside their windows, and Grok — which reports no tokens at all — is broken down by sessions per model instead.
+- **New models need no code change.** The breakdown is the union of whatever the provider reports in `todayTokensByModel`, `modelUsage` and `modelSessions`, weighted by today's tokens, falling back to lifetime share so a quiet morning still shows the mix, then to sessions where there are no tokens. Not one model name appears in the collector or the view; a test asserts that, ignoring comments.
+
+## [1.2.1] — 2026-09-08
+
+### Fixed
+- **Clicking a Herdr card now jumps to that agent's pane.** It focused the Herdr window and left it on whatever workspace was already showing. Herdr draws every workspace inside a *single* window, so an agent's own process ancestry resolves that window directly and the collector's client-window lookup — the only place that set `attached` — never ran. The pane focus was gated on `attached`, so on this box all 19 Herdr sessions reported "not attached" while their panes were perfectly reachable, and the jump never fired. The gate is gone (`focusHerdrPane` already refuses ids it cannot validate), and `attached` now means what it says: the host has a window, however that window was found. The card's own label promised "click jumps to the pane" the whole time.
+
+## [1.2.0] — 2026-09-08
+
+### Added
+- **Grok in USAGE & LIMITS.** Omarchy ships no usage collector for Grok, and Grok itself bills credits rather than rate-limit windows — `/usage` opens billing in a browser and nothing about it is cached on disk. What *is* on disk is one directory per session, so the card now reports what is genuinely measurable: prompts today and lifetime, sessions today and lifetime, and the model in use. It draws **no limit bars**, because there are none to draw.
+
+### Changed
+- **A provider with no token data no longer reports `0 tok`.** That read as "used no tokens today" when the truth is "publishes no token counts". Providers that do publish are unchanged; `hasTokenData` distinguishes the two.
+- **`usageStatusText` is finally rendered.** It had been collected and normalized for months and shown nowhere. It appears under a provider that has no limit bars, so the card can say why — Grok explains its credits, and Fireworks now shows "Fireworks unavailable" instead of a bare zero.
 
 ## [1.1.3] — 2026-09-07
 

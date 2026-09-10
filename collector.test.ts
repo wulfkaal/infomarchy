@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join, relative } from "path";
-import { providerOf, titleLooksBusy, cmdIsTurnInhibitor, sessionIdFrom, sessionHostsFromEnvironment, tmuxSocketFromEnvironment, parseTmuxPanes, parseTmuxClients, tmuxPaneForAncestors, linkRecentToLive, inferSessionIdsFromRecent, attachSessionTopics, localSessionSummary, cleanGeneratedSummary, activityCellIndex, parseExternalIpTrace, externalIpCacheFresh, frameSnapshot, parseJsonBounded, readRegularFileLimited, safePrompt, sessionPresentation, writePrivateStateFile, decodeProjectDir, dropPartialFirstLine, readHistoryTail, readRegularFileHead, rolloutSessionId, rolloutCwd, topicCacheHit, topicRetryBlocked, pruneTopicCache, reapStateTempFiles, parseGpuLine, parseDfRows, plausibleTimestamp, normalizeUsage, normalizeUsageLimit, ollamaHostIsLocal, topicRefinementAllowed, terminate, rateForModel, estimateValue, valueSummary, alignDailyTokens, localDayKey, loadPricing, todayValueEstimate, herdrSocketFromEnvironment, herdrClientPids, herdrWindowFor, boomuxClientShellId, boomuxWindowFor, backgroundDaemonKind, parseClaudeAgents, sessionStaleness, STALE_AFTER_MS, decodeBase32, grokBotLine, grokBotRow, grokBotAttention, attachGrokBotRoster } from "./collector.ts";
+import { providerOf, titleLooksBusy, cmdIsTurnInhibitor, sessionIdFrom, sessionHostsFromEnvironment, tmuxSocketFromEnvironment, parseTmuxPanes, parseTmuxClients, tmuxPaneForAncestors, linkRecentToLive, inferSessionIdsFromRecent, attachSessionTopics, localSessionSummary, cleanGeneratedSummary, activityCellIndex, parseExternalIpTrace, externalIpCacheFresh, frameSnapshot, parseJsonBounded, readRegularFileLimited, safePrompt, sessionPresentation, writePrivateStateFile, decodeProjectDir, dropPartialFirstLine, readHistoryTail, readRegularFileHead, rolloutSessionId, rolloutCwd, topicCacheHit, topicRetryBlocked, pruneTopicCache, reapStateTempFiles, parseGpuLine, parseDfRows, plausibleTimestamp, normalizeUsage, normalizeUsageLimit, ollamaHostIsLocal, topicRefinementAllowed, terminate, rateForModel, estimateValue, valueSummary, alignDailyTokens, localDayKey, loadPricing, todayValueEstimate, herdrSocketFromEnvironment, herdrClientPids, herdrWindowFor, boomuxClientShellId, boomuxWindowFor, backgroundDaemonKind, parseClaudeAgents, sessionStaleness, STALE_AFTER_MS, decodeBase32, grokBotLine, grokBotRow, grokBotAttention, attachGrokBotRoster, grokSessionUsage, usageModelBreakdown } from "./collector.ts";
 import { sessionEventId } from "./notification-events.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "infomarchy-test-"));
@@ -833,6 +833,20 @@ describe("today's value at the blended lifetime rate", () => {
 });
 
 describe("Herdr-hosted agents get their client's window", () => {
+  test("a Herdr host with a window is attached, however that window was found", () => {
+    // Live data, 2026-09-08: all 19 Herdr sessions on this box shared one
+    // window (Herdr draws every workspace inside it), so every agent resolved
+    // it through its own ancestry, the client-window lookup never ran, and
+    // every host reported attached=undefined while its pane was reachable.
+    // The card then refused to jump and left Herdr on whatever was showing.
+    const source = readFileSync(join(import.meta.dir, "collector.ts"), "utf8");
+    const block = source.match(/const herdrHost = hosts\.find[\s\S]*?\n    \}/)?.[0];
+    expect(block).toBeTruthy();
+    expect(block).toContain("herdrHost.attached = !!w;");
+    // The old form set it only inside the no-window branch.
+    expect(block).not.toContain("{ w = clientWindow; herdrHost.attached = true; }");
+  });
+
   test("only the herdr CLIENT process counts, never the server or utility invocations", () => {
     const commands = new Map<number, string[]>([
       [10, ["/usr/bin/herdr", "server"]],
@@ -920,6 +934,94 @@ describe("Claude's own session registry", () => {
     expect(map.get(305287)?.status).toBe("busy");
     expect(map.get(7)?.sessionId).toBe("");
     expect(parseClaudeAgents("not json").size).toBe(0);
+  });
+});
+
+describe("the per-model breakdown learns new models on its own", () => {
+  test("a model nobody has heard of yet needs no code change", () => {
+    // The whole point: this must not know the name of any model.
+    const models = usageModelBreakdown({
+      todayTokensByModel: { "some-model-9": 300, "gpt-7-unreleased": 700 },
+      modelUsage: { "some-model-9": { inputTokens: 1000 }, "gpt-7-unreleased": { outputTokens: 3000 } },
+    });
+    expect(models.map(m => m.id)).toEqual(["gpt-7-unreleased", "some-model-9"]);
+    expect(models[0].share).toBeCloseTo(0.7, 5);
+    expect(models[1].share).toBeCloseTo(0.3, 5);
+  });
+
+  test("share falls back to lifetime so a quiet morning still shows the mix", () => {
+    const models = usageModelBreakdown({ modelUsage: { a: { inputTokens: 750 }, b: { inputTokens: 250 } } });
+    expect(models.map(m => [m.id, Math.round(m.share * 100)])).toEqual([["a", 75], ["b", 25]]);
+  });
+
+  test("every token field counts toward a model's weight", () => {
+    const [only] = usageModelBreakdown({ modelUsage: { m: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 4, cacheCreationInputTokens: 8 } } });
+    expect(only.lifetimeTokens).toBe(15);
+  });
+
+  test("a provider with sessions but no tokens is still broken down", () => {
+    // Grok: no token counts anywhere, so sessions are the only weight there is.
+    const models = usageModelBreakdown({ modelSessions: { "grok-4.6": 18, "grok-4-fast": 2 } });
+    expect(models.map(m => [m.id, m.sessions])).toEqual([["grok-4.6", 18], ["grok-4-fast", 2]]);
+    expect(models.every(m => m.todayTokens === 0 && m.share === 0)).toBe(true);
+  });
+
+  test("junk in the usage cache cannot produce a row or a runaway list", () => {
+    expect(usageModelBreakdown({})).toEqual([]);
+    expect(usageModelBreakdown({ modelUsage: "nope", todayTokensByModel: [1, 2] })).toEqual([]);
+    const many: Record<string, number> = {};
+    for (let i = 0; i < 200; i++) many["m" + i] = i;
+    expect(usageModelBreakdown({ todayTokensByModel: many }).length).toBe(8);
+    const [negative] = usageModelBreakdown({ modelUsage: { m: { inputTokens: -5, outputTokens: 10 } } });
+    expect(negative.lifetimeTokens).toBe(10);
+  });
+});
+
+describe("Grok reaches USAGE & LIMITS without inventing limits", () => {
+  const root = join(testRoot, "grok-usage");
+
+  test("sessions and models come from the session directories", () => {
+    const group = join(root, "sessions", "%2Fhome%2Fpi");
+    const today = new Date().toISOString();
+    const old = new Date(Date.now() - 40 * 86400_000).toISOString();
+    for (const [id, active, model] of [
+      ["0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001", today, "grok-4.6"],
+      ["0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002", today, "grok-4.6"],
+      ["0199aaaa-bbbb-7ccc-8ddd-eeeeffff0003", old, "grok-4-fast"],
+    ] as const) {
+      mkdirSync(join(group, id), { recursive: true });
+      writeFileSync(join(group, id, "summary.json"), JSON.stringify({ info: { id }, last_active_at: active, current_model_id: model }));
+    }
+    // Not a session directory, and must not be counted as one.
+    writeFileSync(join(root, "sessions", "session_search.sqlite"), "x");
+
+    const usage = grokSessionUsage(root);
+    expect(usage.sessions).toBe(3);
+    expect(usage.todaySessions).toBe(2);
+    expect(usage.models.sort()).toEqual(["grok-4-fast", "grok-4.6"]);
+  });
+
+  test("absent token data is not reported as zero tokens", () => {
+    // Grok publishes no token totals, so "0 tok" would be a measurement it
+    // never made. Claude and Codex, which do publish, must be unaffected.
+    expect(normalizeUsage({ name: "Grok", todayPrompts: 18, limits: [] }).hasTokenData).toBe(false);
+    expect(normalizeUsage({ name: "Codex", todayTotalTokens: 3284541 }).hasTokenData).toBe(true);
+    expect(normalizeUsage({ name: "Claude", modelUsage: { "claude-opus-5": { inputTokens: 10 } } }).hasTokenData).toBe(true);
+    expect(normalizeUsage({ name: "X", recentDays: [{ totalTokens: 5 }] }).hasTokenData).toBe(true);
+  });
+
+  test("no limit windows are fabricated, and the reason is carried to the card", () => {
+    const usage = normalizeUsage({
+      name: "Grok", ready: true, todayPrompts: 18, totalPrompts: 56, todaySessions: 5, totalSessions: 18,
+      limits: [], usageStatusText: "credits, not rate-limit windows",
+    });
+    expect(usage.limits).toEqual([]);
+    expect(usage.usageStatusText).toBe("credits, not rate-limit windows");
+    expect(usage.todayPrompts).toBe(18);
+    expect(usage.totalSessions).toBe(18);
+    // Nothing priced, so no money is guessed at either.
+    expect(usage.value.lifetime).toBeNull();
+    expect(usage.value.today).toBeNull();
   });
 });
 

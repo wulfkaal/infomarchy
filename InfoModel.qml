@@ -126,6 +126,7 @@ Item {
       case "ollama": return root.green
       case "opencode": return root.blue
       case "aider": return root.yellow
+      case "remote": return root.cyan
       case "copilot": return root.magenta
       default: return Color.accent
     }
@@ -154,6 +155,7 @@ Item {
       case "ollama": return "Ollama"
       case "opencode": return "opencode"
       case "aider": return "Aider"
+      case "remote": return "Remote"
       case "copilot": return "Copilot"
       default: return plainText(p, 64)
     }
@@ -277,6 +279,17 @@ Item {
       Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow", "address:0x" + addr])
   }
 
+  // Focus a Hyprland workspace by number, on both dispatch syntaxes. Used only
+  // by the REMOTE card, whose agents have no window here to focus.
+  function focusWorkspace(workspace) {
+    var ws = String(workspace || "")
+    if (!/^[1-9][0-9]?$/.test(ws)) return
+    if (root.snap && root.snap.hyprLua)
+      Quickshell.execDetached(["hyprctl", "dispatch", 'hl.dsp.focus({ workspace = ' + ws + ' })'])
+    else
+      Quickshell.execDetached(["hyprctl", "dispatch", "workspace", ws])
+  }
+
   // An agent inside tmux may live on a window/pane the client is not showing.
   // After focusing the terminal, select that pane so the agent is on screen.
   // Both values come from the collector and are validated here again.
@@ -381,7 +394,12 @@ Item {
     for (var i = 0; i < hosts.length; i++) {
       var host = hosts[i] || {}
       if (host.kind === "tmux" && host.paneId && host.attached && !host.activePane) focusTmuxPane(host.server, host.paneId)
-      else if (host.kind === "herdr" && host.attached) focusHerdrPane(host)
+      // Not gated on `attached`: Herdr draws every workspace inside ONE window,
+      // so an agent's own ancestry resolves that window directly and the
+      // collector's client-window lookup never runs. Gating here meant the
+      // click focused Herdr and then left it on whatever workspace was already
+      // showing. focusHerdrPane re-validates the ids and does nothing without.
+      else if (host.kind === "herdr") focusHerdrPane(host)
       else if (host.kind === "boomux" && host.shellId) focusBoomuxShell(host)
     }
     return true
